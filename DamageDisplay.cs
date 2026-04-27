@@ -214,12 +214,19 @@ namespace FH_DamageRankMod
             var presentIds = new HashSet<ulong>(snapshot.Rows.Select(x => x.NetId));
             RemoveRowsNotInSnapshot(presentIds);
 
-            foreach (var row in snapshot.Rows)
+            for (var i = 0; i < snapshot.Rows.Count; i++)
             {
+                var row = snapshot.Rows[i];
                 if (!_rowUiByNetId.TryGetValue(row.NetId, out var ui))
                 {
                     ui = CreatePlayerRowUi();
                     _rowUiByNetId[row.NetId] = ui;
+                }
+
+                // 关键：按快照顺序重排容器中的子节点，保证列表视觉顺序和伤害排序一致。
+                if (ui.RowPanel.GetParent() == _rowsContainer && ui.RowPanel.GetIndex() != i)
+                {
+                    _rowsContainer.MoveChild(ui.RowPanel, i);
                 }
 
                 ApplyRow(ui, row);
