@@ -1,0 +1,11 @@
+{
+  "id": "FH_DamageRankMod",
+  "name": "伤害排行榜模组",
+  "author": "FH",
+  "description": "我的杀戮尖塔2模组",
+  "version": "v1.0.0",
+  "has_pck": true,
+  "has_dll": true,
+  "dependencies": [],
+  "affects_gameplay": false
+}
