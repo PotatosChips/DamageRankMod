@@ -17,18 +17,18 @@ namespace FH_DamageRankMod
             public Label RankLabel { get; set; }
             public Label MainLineLabel { get; set; }
             public Label SubLineLabel { get; set; }
-            public int LastBattleDamage { get; set; }
-            public double HighlightUntilSec { get; set; }
         }
 
         private readonly Dictionary<ulong, string> _nameCache = new();
         private readonly Dictionary<ulong, PlayerRowUi> _rowUiByNetId = new();
-        private readonly Dictionary<ulong, int> _lastDamageByNetId = new();
 
         private PanelContainer _rootPanel;
         private VBoxContainer _rowsContainer;
         private Label _titleLabel;
         private Label _summaryLabel;
+        private VBoxContainer _contentContainer;
+        private HBoxContainer _headerRow;
+        private Button _collapseButton;
 
         private bool _uiBuilt;
         private bool _dirty;
@@ -37,6 +37,10 @@ namespace FH_DamageRankMod
         private float _refreshIntervalSec = 0.15f;
         private double _nextRenderAtSec;
         private bool _isDragging;
+        private float _uiScale = 0.88f;
+        private bool _isCollapsed;
+        private readonly Vector2 _expandedMinSize = new(430, 220);
+        private readonly Vector2 _collapsedMinSize = new(430, 58);
 
         // 当前战斗上下文，来自 CombatStateNotifier 事件。
         public CombatState combatState { get; set; }
@@ -85,10 +89,8 @@ namespace FH_DamageRankMod
 
             _rootPanel = new PanelContainer
             {
-                Position = new Vector2(12, 12),
-                CustomMinimumSize = new Vector2(430, 220)
+                CustomMinimumSize = _expandedMinSize
             };
-
             var panelStyle = new StyleBoxFlat
             {
                 BgColor = new Color(0.08f, 0.09f, 0.13f, 0.84f),
@@ -115,14 +117,32 @@ namespace FH_DamageRankMod
             rootColumn.AddThemeConstantOverride("separation", 6);
             outerMargin.AddChild(rootColumn);
 
+            _headerRow = new HBoxContainer();
+            _headerRow.AddThemeConstantOverride("separation", 8);
+            rootColumn.AddChild(_headerRow);
+
             _titleLabel = new Label
             {
                 Text = "Damage Board"
             };
             _titleLabel.AddThemeFontSizeOverride("font_size", 17);
             _titleLabel.AddThemeColorOverride("font_color", new Color(0.98f, 0.92f, 0.66f));
-            rootColumn.AddChild(_titleLabel);
-            _titleLabel.MouseFilter = Control.MouseFilterEnum.Stop;
+            _titleLabel.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
+            _headerRow.AddChild(_titleLabel);
+            // 事件交给根面板处理，确保标题整块区域都能拖动。
+            _titleLabel.MouseFilter = Control.MouseFilterEnum.Ignore;
+
+            _collapseButton = new Button
+            {
+                Text = "−",
+                CustomMinimumSize = new Vector2(34, 24)
+            };
+            _collapseButton.Pressed += ToggleCollapsed;
+            _headerRow.AddChild(_collapseButton);
+
+            _contentContainer = new VBoxContainer();
+            _contentContainer.AddThemeConstantOverride("separation", 6);
+            rootColumn.AddChild(_contentContainer);
 
             _summaryLabel = new Label
             {
@@ -130,15 +150,16 @@ namespace FH_DamageRankMod
             };
             _summaryLabel.AddThemeFontSizeOverride("font_size", 13);
             _summaryLabel.AddThemeColorOverride("font_color", new Color(0.82f, 0.84f, 0.9f));
-            rootColumn.AddChild(_summaryLabel);
+            _contentContainer.AddChild(_summaryLabel);
 
             _rowsContainer = new VBoxContainer();
             _rowsContainer.AddThemeConstantOverride("separation", 4);
-            rootColumn.AddChild(_rowsContainer);
+            _contentContainer.AddChild(_rowsContainer);
 
             AddChild(_rootPanel);
             // 统一在根面板处理拖拽输入，减少分散事件处理。
             _rootPanel.GuiInput += OnPanelGuiInput;
+            PlacePanelAtTopRightGoldenRatio();
             _uiBuilt = true;
         }
 
@@ -169,10 +190,26 @@ namespace FH_DamageRankMod
 
         private bool IsInTitleBar(Vector2 localPosition)
         {
-            // 扩大拖动热区：面板上半区域都可拖动，提升命中率。
-            var panelHeight = Mathf.Max(_rootPanel.Size.Y, _rootPanel.CustomMinimumSize.Y);
-            var dragZoneHeight = Mathf.Max(90f, panelHeight * 0.5f);
-            return localPosition.Y <= dragZoneHeight;
+            // 标题栏整条可拖动（按钮区域除外，避免点按钮时触发拖动）。
+            var panelWidth = Mathf.Max(_rootPanel.Size.X, _rootPanel.CustomMinimumSize.X);
+            const float headerHeight = 56f;
+            var inHeader = localPosition.X >= 0f
+                && localPosition.X <= panelWidth
+                && localPosition.Y >= 0f
+                && localPosition.Y <= headerHeight;
+
+            if (!inHeader)
+            {
+                return false;
+            }
+
+            if (_collapseButton == null)
+            {
+                return true;
+            }
+
+            var buttonRect = new Rect2(_collapseButton.Position, _collapseButton.Size);
+            return !buttonRect.HasPoint(localPosition);
         }
 
         private Vector2 ClampToViewport(Vector2 position)
@@ -192,6 +229,32 @@ namespace FH_DamageRankMod
                 Mathf.Clamp(position.X, 0f, maxX),
                 Mathf.Clamp(position.Y, 0f, maxY)
             );
+        }
+
+        private void PlacePanelAtTopRightGoldenRatio()
+        {
+            var viewport = GetViewport();
+            if (viewport == null)
+            {
+                _rootPanel.Position = new Vector2(12f, 12f);
+                return;
+            }
+
+            // 初始放在右上偏内侧，避免贴边太紧，也尽量不挡住主战斗区域。
+            var viewportSize = viewport.GetVisibleRect().Size;
+            var panelWidth = Mathf.Max(_rootPanel.Size.X, _rootPanel.CustomMinimumSize.X);
+            var panelHeight = Mathf.Max(_rootPanel.Size.Y, _rootPanel.CustomMinimumSize.Y);
+
+            const float phi = 0.618f;
+            var rightPadding = Mathf.Max(18f, viewportSize.X * (1f - phi) * 0.12f);
+            var topPadding = Mathf.Max(16f, viewportSize.Y * 0.04f);
+
+            var targetPosition = new Vector2(
+                viewportSize.X - panelWidth - rightPadding,
+                topPadding
+            );
+
+            _rootPanel.Position = ClampToViewport(targetPosition);
         }
 
         public void UIdisplay(int damage)
@@ -217,9 +280,13 @@ namespace FH_DamageRankMod
             for (var i = 0; i < snapshot.Rows.Count; i++)
             {
                 var row = snapshot.Rows[i];
+                // 尝试通过玩家NetId查找UI → 找不到就进入if
                 if (!_rowUiByNetId.TryGetValue(row.NetId, out var ui))
                 {
+                    // 找不到 → 创建新的玩家行UI
                     ui = CreatePlayerRowUi();
+
+                    // 把新创建的UI存入字典，下次直接用
                     _rowUiByNetId[row.NetId] = ui;
                 }
 
@@ -246,31 +313,31 @@ namespace FH_DamageRankMod
                 CornerRadiusTopRight = 6
             };
             rowPanel.AddThemeStyleboxOverride("panel", rowStyle);
-
+            //内边距（Margin）
             var rowMargin = new MarginContainer();
             rowMargin.AddThemeConstantOverride("margin_left", 8);
             rowMargin.AddThemeConstantOverride("margin_right", 8);
             rowMargin.AddThemeConstantOverride("margin_top", 6);
             rowMargin.AddThemeConstantOverride("margin_bottom", 6);
             rowPanel.AddChild(rowMargin);
-
+            //垂直布局（上下两行)
             var column = new VBoxContainer();
             column.AddThemeConstantOverride("separation", 1);
             rowMargin.AddChild(column);
-
+            // 上行：排名 + 主信息
             var topLine = new HBoxContainer();
             topLine.AddThemeConstantOverride("separation", 8);
             column.AddChild(topLine);
-
+            // 排名标签，初始文本占位，后续根据数据更新。
             var rankLabel = new Label { Text = "#-" };
             rankLabel.AddThemeFontSizeOverride("font_size", 14);
             topLine.AddChild(rankLabel);
-
+            // 主信息标签
             var mainLineLabel = new Label { Text = "玩家 | 本场: 0 | 占比: 0%" };
             mainLineLabel.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
             mainLineLabel.AddThemeFontSizeOverride("font_size", 14);
             topLine.AddChild(mainLineLabel);
-
+            // 下行：次要信息
             var subLineLabel = new Label { Text = "总伤害: 0" };
             subLineLabel.AddThemeFontSizeOverride("font_size", 12);
             subLineLabel.AddThemeColorOverride("font_color", new Color(0.7f, 0.73f, 0.79f));
@@ -289,10 +356,10 @@ namespace FH_DamageRankMod
 
         private void ApplyRow(PlayerRowUi ui, DamageUiRow row)
         {
-            var nowSec = Time.GetTicksMsec() / 1000.0;
+            var rankColor = GetRankColor(row.Rank);
             ui.RankLabel.Text = $"#{row.Rank}";
-            ui.RankLabel.AddThemeColorOverride("font_color", GetRankColor(row.Rank));
-
+            ui.MainLineLabel.AddThemeColorOverride("font_color", rankColor);
+            ui.RankLabel.AddThemeColorOverride("font_color", rankColor);
             var mainText = $"{row.Name} | 本场: {row.BattleDamage}";
             if (_showShare)
             {
@@ -302,25 +369,6 @@ namespace FH_DamageRankMod
             ui.MainLineLabel.Text = mainText;
             ui.SubLineLabel.Text = _showTotalDamage ? $"总伤害: {row.TotalDamage}" : string.Empty;
             ui.SubLineLabel.Visible = _showTotalDamage;
-
-            // 若本场伤害上涨，短时间高亮玩家名，方便肉眼捕捉伤害跳动。
-            var oldDamage = _lastDamageByNetId.TryGetValue(row.NetId, out var oldVal) ? oldVal : 0;
-            if (row.BattleDamage > oldDamage)
-            {
-                ui.HighlightUntilSec = nowSec + 0.7;
-            }
-
-            if (nowSec <= ui.HighlightUntilSec)
-            {
-                ui.MainLineLabel.AddThemeColorOverride("font_color", new Color(0.99f, 0.9f, 0.52f));
-            }
-            else
-            {
-                ui.MainLineLabel.AddThemeColorOverride("font_color", new Color(0.92f, 0.94f, 0.98f));
-            }
-
-            _lastDamageByNetId[row.NetId] = row.BattleDamage;
-            ui.LastBattleDamage = row.BattleDamage;
         }
 
         private void RemoveRowsNotInSnapshot(HashSet<ulong> presentIds)
@@ -332,16 +380,29 @@ namespace FH_DamageRankMod
                 var ui = _rowUiByNetId[staleId];
                 ui.RowPanel.QueueFree();
                 _rowUiByNetId.Remove(staleId);
-                _lastDamageByNetId.Remove(staleId);
             }
         }
 
         private Color GetRankColor(int rank)
         {
-            if (rank == 1) return new Color(1f, 0.86f, 0.46f);
-            if (rank == 2) return new Color(0.82f, 0.87f, 0.95f);
-            if (rank == 3) return new Color(0.89f, 0.67f, 0.43f);
+            if (rank == 1) return new Color(1, 0.25f, 0.25f);
+            if (rank == 2) return new Color(0.25f, 0.5f, 1);
+            if (rank == 3) return new Color(1, 0.9f, 0.2f);
             return new Color(0.74f, 0.78f, 0.85f);
+        }
+
+        private void ToggleCollapsed()
+        {
+            _isCollapsed = !_isCollapsed;
+            _contentContainer.Visible = !_isCollapsed;
+            _collapseButton.Text = _isCollapsed ? "+" : "−";
+            _rootPanel.CustomMinimumSize = _isCollapsed ? _collapsedMinSize : _expandedMinSize;
+
+            // 真正折叠：不仅隐藏内容，也同步收缩面板高度。
+            _rootPanel.ResetSize();
+            var targetSize = _isCollapsed ? _collapsedMinSize : _expandedMinSize;
+            _rootPanel.Size = targetSize;
+            _rootPanel.Position = ClampToViewport(_rootPanel.Position);
         }
 
         private string GetOnlineNameCached(ulong playerId)
